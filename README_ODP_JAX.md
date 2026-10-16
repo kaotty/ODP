@@ -59,3 +59,69 @@ The parameter-by-parameter comparison with the original ODP scripts is in
 `ODP_JAX_PARITY.md`.
 
 The Chinese training workflow is documented in `TRAINING_GUIDE_CN.md`.
+
+## Pulling the `jax` branch on another service
+
+```bash
+git clone --branch jax --single-branch https://github.com/kaotty/ODP.git ODP-jax
+cd ODP-jax
+git branch --show-current
+```
+
+For an authenticated SSH checkout:
+
+```bash
+git clone --branch jax --single-branch git@github.com:kaotty/ODP.git ODP-jax
+```
+
+To update an existing checkout:
+
+```bash
+git fetch origin jax
+git switch jax
+git pull --ff-only origin jax
+```
+
+## Running on an H800 node
+
+The current `odp_main.py` uses one JAX process and one device. Set one GPU
+explicitly for a single pipeline:
+
+```bash
+python3 -m venv /data/$USER/odp-jax-env
+source /data/$USER/odp-jax-env/bin/activate
+pip install -r requirements.txt
+
+# Use the CUDA wheel matching the node driver. For a CUDA 12 node:
+pip install -U "jax[cuda12]"
+
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export CUDA_VISIBLE_DEVICES=0
+python - <<'PY'
+import jax
+print(jax.devices())
+PY
+```
+
+Run the stages sequentially in one output directory so each stage can restore
+the previous FQL-style checkpoint:
+
+```bash
+export ENV_NAME=antmaze-large-navigate-singletask-task4-v0
+export SAVE_DIR=exp/odp_jax/antmaze_task4
+
+python odp_main.py --stage planner --env_name "$ENV_NAME" --profile odp_antmaze_task4 --save_dir "$SAVE_DIR"
+python odp_main.py --stage kernel --env_name "$ENV_NAME" --profile odp_antmaze_task4 --save_dir "$SAVE_DIR" --restore_path "$SAVE_DIR/planner" --restore_epoch 1000000
+python odp_main.py --stage reward --env_name "$ENV_NAME" --profile odp_antmaze_task4 --save_dir "$SAVE_DIR" --restore_path "$SAVE_DIR/kernel" --restore_epoch 20000
+python odp_main.py --stage critic --env_name "$ENV_NAME" --profile odp_antmaze_task4 --save_dir "$SAVE_DIR" --restore_path "$SAVE_DIR/reward" --restore_epoch 40000
+python odp_main.py --stage finetune --env_name "$ENV_NAME" --profile odp_antmaze_task4 --save_dir "$SAVE_DIR" --restore_path "$SAVE_DIR/critic" --restore_epoch 20
+```
+
+An eight H800 node can run eight independent task or hyperparameter jobs by
+assigning a different `CUDA_VISIBLE_DEVICES` and `SAVE_DIR` to each job. The
+current ODP-JAX agent does not yet implement synchronized `jax.pmap` updates;
+launching eight copies of one pipeline would create eight unsynchronized
+optimizers. Keep one GPU per pipeline until a data-parallel update layer is
+added. The CUDA wheel choice should follow the installed driver and the
+[official JAX installation guide](https://docs.jax.dev/en/latest/installation.html).
